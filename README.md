@@ -17,13 +17,6 @@ This project implements an event-driven workflow where order submission is fast 
 - Unit and integration test suites
 - Infrastructure templates under infrastructure/
 
-## Latest Compliance Fixes
-
-- 202 is returned only after successful enqueue:
-	- OrderCreator now returns 500 if SQS enqueue fails.
-- Durable idempotency across cold starts and multiple instances:
-	- OrderProcessor now uses PostgreSQL-backed idempotency (processed_messages table) instead of in-memory state.
-
 ## High-Level Architecture
 
 1. Client sends POST /orders.
