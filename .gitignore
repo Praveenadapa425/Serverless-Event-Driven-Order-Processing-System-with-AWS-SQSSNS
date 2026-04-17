@@ -1,11 +1,64 @@
-.env
-.venv/
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Testing
 .pytest_cache/
-.mypy_cache/
 .coverage
+.coverage.*
 htmlcov/
+*.cover
+.hypothesis/
 *.log
-.idea/
+
+# IDE
 .vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# LocalStack
+.localstack/
+localstack_*
+
+# Docker
+.docker/
+docker-compose.override.yml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific
+*.pid
+*.seed
+*.pid.lock
+
+# Infrastructure generated artifacts
+infrastructure/node_modules/
+infrastructure/.serverless/
