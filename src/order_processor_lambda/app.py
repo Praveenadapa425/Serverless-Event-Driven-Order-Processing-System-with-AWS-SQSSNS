@@ -17,10 +17,6 @@ from shared import (
 logger = setup_logger(__name__)
 
 
-# In-memory store for idempotency (in production, use DynamoDB or similar)
-processed_messages = {}
-
-
 def lambda_handler(event, context):
     """
     Process order from SQS queue.
@@ -53,23 +49,24 @@ def lambda_handler(event, context):
             
             logger.info(f"Processing message: {message_id}, Order: {order_id}")
             
-            # Check idempotency - have we already processed this message?
-            if is_message_processed(message_id):
-                logger.info(f"Message {message_id} already processed (idempotent)")
-                results.append({
-                    'messageId': message_id,
-                    'status': 'skipped',
-                    'reason': 'already_processed'
-                })
-                continue
-            
-            # Mark message as processed
-            mark_message_processed(message_id)
-            
             # Retrieve order from database
             db = None
             try:
                 db = get_db_connection()
+
+                # Ensure durable idempotency table exists and acquire first-process token.
+                db.ensure_processed_messages_table()
+                first_processing_attempt = db.mark_message_processed_once(message_id, order_id)
+
+                if not first_processing_attempt:
+                    logger.info(f"Message {message_id} already processed (idempotent)")
+                    results.append({
+                        'messageId': message_id,
+                        'status': 'skipped',
+                        'reason': 'already_processed'
+                    })
+                    continue
+
                 order = db.get_order(order_id)
                 
                 if not order:
@@ -175,24 +172,3 @@ def simulate_order_processing(order_id: str) -> tuple:
     else:
         logger.warning(f"Order {order_id} processing failed")
         return False, 'FAILED'
-
-
-def is_message_processed(message_id: str) -> bool:
-    """Check if message has already been processed (idempotency check)."""
-    return message_id in processed_messages
-
-
-def mark_message_processed(message_id: str):
-    """Mark message as processed."""
-    processed_messages[message_id] = time.time()
-    
-    # Clean up old entries (keep only last 10000 messages)
-    if len(processed_messages) > 10000:
-        # Remove oldest entries
-        oldest_messages = sorted(
-            processed_messages.items(),
-            key=lambda x: x[1]
-        )[:1000]
-        
-        for msg_id, _ in oldest_messages:
-            del processed_messages[msg_id]

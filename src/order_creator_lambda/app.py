@@ -97,8 +97,7 @@ def lambda_handler(event, context):
             logger.info(f"SQS message published: {message_id}")
         except Exception as e:
             logger.error(f"Failed to publish SQS message: {str(e)}")
-            # Don't fail the request if SQS fails - the order is persisted
-            # In production, you might want to use a DLQ or retry mechanism
+            return create_error_response(500, "Failed to enqueue order for processing")
         
         # Return 202 Accepted response
         response_body = {

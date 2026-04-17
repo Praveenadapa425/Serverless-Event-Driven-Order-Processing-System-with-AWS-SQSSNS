@@ -73,6 +73,50 @@ class DatabaseConnection:
         except Exception as e:
             logger.error(f"Failed to create orders table: {str(e)}")
             raise
+
+    def ensure_processed_messages_table(self):
+        """Create processed_messages table for durable idempotency tracking."""
+        try:
+            conn = self.get_connection()
+            cur = conn.cursor()
+
+            create_table_query = """
+            CREATE TABLE IF NOT EXISTS processed_messages (
+                message_id VARCHAR(255) PRIMARY KEY,
+                order_id VARCHAR(255),
+                processed_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            );
+            """
+
+            cur.execute(create_table_query)
+            conn.commit()
+            cur.close()
+        except Exception as e:
+            logger.error(f"Failed to create processed_messages table: {str(e)}")
+            raise
+
+    def mark_message_processed_once(self, message_id: str, order_id: str) -> bool:
+        """Record message_id exactly once. Returns True only for first processing attempt."""
+        try:
+            conn = self.get_connection()
+            cur = conn.cursor()
+
+            insert_query = """
+            INSERT INTO processed_messages (message_id, order_id)
+            VALUES (%s, %s)
+            ON CONFLICT (message_id) DO NOTHING
+            """
+
+            cur.execute(insert_query, (message_id, order_id))
+            inserted = cur.rowcount > 0
+            conn.commit()
+            cur.close()
+            return inserted
+        except Exception as e:
+            logger.error(f"Failed to mark message as processed: {str(e)}")
+            if conn:
+                conn.rollback()
+            raise
     
     def insert_order(self, order_id: str, user_id: str, product_id: str, quantity: int) -> bool:
         """Insert a new order into the database."""
