@@ -32,26 +32,29 @@ See also:
 
 ## Project Structure
 
-src/
-- order_creator_lambda/
-- order_processor_lambda/
-- notification_service_lambda/
-- shared/
+```text
+.
+├── src/
+│   ├── order_creator_lambda/
+│   ├── order_processor_lambda/
+│   ├── notification_service_lambda/
+│   └── shared/
+│
+├── tests/
+│   ├── unit/
+│   └── integration/
+│
+├── infrastructure/
+│   ├── serverless.yml
+│   └── template.yaml
+│
+├── scripts/
+│   ├── init-localstack.sh
+│   ├── init-db.sql
+│   ├── setup.sh
+│   ├── deploy-to-aws.sh
+│   └── deploy-to-aws.ps1
 
-tests/
-- unit/
-- integration/
-
-infrastructure/
-- serverless.yml
-- template.yaml
-
-scripts/
-- init-localstack.sh
-- init-db.sql
-- setup.sh
-- deploy-to-aws.sh
-- deploy-to-aws.ps1
 
 ## Tech Stack
 
