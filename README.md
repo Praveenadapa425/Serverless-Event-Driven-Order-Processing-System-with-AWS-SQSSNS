@@ -54,7 +54,7 @@ See also:
 │   ├── setup.sh
 │   ├── deploy-to-aws.sh
 │   └── deploy-to-aws.ps1
-
+```
 
 ## Tech Stack
 
