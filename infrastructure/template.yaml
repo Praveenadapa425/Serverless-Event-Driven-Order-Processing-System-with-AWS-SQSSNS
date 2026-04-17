@@ -1,0 +1,324 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+
+Description: |
+  Serverless Event-Driven Order Processing System
+  - API Gateway endpoint for order submission
+  - Lambda functions for order creation, processing, and notifications
+  - SQS queue with DLQ for durable message processing
+  - SNS topic for fan-out notifications
+  - RDS for order persistence
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: dev
+    Description: Environment name (dev, staging, prod)
+  
+  DBInstanceClass:
+    Type: String
+    Default: db.t3.micro
+    Description: RDS instance class
+  
+  DBUsername:
+    Type: String
+    NoEcho: true
+    Description: Database master username
+  
+  DBPassword:
+    Type: String
+    NoEcho: true
+    Description: Database master password (min 8 characters)
+
+Globals:
+  Function:
+    Timeout: 30
+    MemorySize: 512
+    Runtime: python3.9
+    Environment:
+      Variables:
+        AWS_REGION: !Ref AWS::Region
+        ENVIRONMENT: !Ref EnvironmentName
+
+Resources:
+  # SQS Queue for order processing
+  OrderProcessingQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'OrderProcessingQueue-${EnvironmentName}'
+      VisibilityTimeout: 60
+      MessageRetentionPeriod: 1209600  # 14 days
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt OrderProcessingDLQ.Arn
+        maxReceiveCount: 3
+
+  # Dead Letter Queue
+  OrderProcessingDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'OrderProcessingDLQ-${EnvironmentName}'
+      MessageRetentionPeriod: 1209600  # 14 days
+
+  # SNS Topic for order status notifications
+  OrderStatusNotifications:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub 'OrderStatusNotifications-${EnvironmentName}'
+      DisplayName: Order Status Updates
+
+  # RDS PostgreSQL Database
+  OrderDatabaseSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnet group for Order Database
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+
+  OrderDatabase:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    Properties:
+      Engine: postgres
+      EngineVersion: '15.1'
+      DBInstanceClass: !Ref DBInstanceClass
+      AllocatedStorage: '20'
+      StorageType: gp3
+      DBName: orders_db
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      DBSubnetGroupName: !Ref OrderDatabaseSubnetGroup
+      VPCSecurityGroups:
+        - !Ref DatabaseSecurityGroup
+      BackupRetentionPeriod: 7
+      PreferredBackupWindow: '03:00-04:00'
+      PreferredMaintenanceWindow: 'sun:04:00-sun:05:00'
+      EnableCloudwatchLogsExports:
+        - postgresql
+      EnableIAMDatabaseAuthentication: true
+      MultiAZ: true
+
+  # OrderCreator Lambda Function
+  OrderCreatorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'OrderCreator-${EnvironmentName}'
+      CodeUri: src/order_creator_lambda/
+      Handler: app.lambda_handler
+      Description: Create new orders via API Gateway
+      MemorySize: 512
+      Timeout: 30
+      Environment:
+        Variables:
+          ORDER_PROCESSING_QUEUE_URL: !Ref OrderProcessingQueue
+          DB_HOST: !GetAtt OrderDatabase.Endpoint.Address
+          DB_PORT: !GetAtt OrderDatabase.Endpoint.Port
+          DB_NAME: orders_db
+          DB_USER: !Ref DBUsername
+          DB_PASSWORD: !Ref DBPassword
+      Policies:
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt OrderProcessingQueue.QueueName
+        - AWSSecretsManagerReadWrite
+        - EC2SecurityGroupIngress:
+            GroupId: !Ref LambdaSecurityGroup
+            IpProtocol: tcp
+            FromPort: 5432
+            ToPort: 5432
+            CidrIp: 10.0.0.0/8
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds:
+          - !Ref PrivateSubnet1
+          - !Ref PrivateSubnet2
+      Events:
+        OrdersApiEvent:
+          Type: Api
+          Properties:
+            RestApiId: !Ref OrdersApi
+            Path: /orders
+            Method: POST
+
+  # OrderProcessor Lambda Function
+  OrderProcessorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'OrderProcessor-${EnvironmentName}'
+      CodeUri: src/order_processor_lambda/
+      Handler: app.lambda_handler
+      Description: Process orders from SQS queue
+      MemorySize: 512
+      Timeout: 60
+      Environment:
+        Variables:
+          ORDER_STATUS_TOPIC_ARN: !Ref OrderStatusNotifications
+          DB_HOST: !GetAtt OrderDatabase.Endpoint.Address
+          DB_PORT: !GetAtt OrderDatabase.Endpoint.Port
+          DB_NAME: orders_db
+          DB_USER: !Ref DBUsername
+          DB_PASSWORD: !Ref DBPassword
+      Policies:
+        - SQSPollerPolicy:
+            QueueName: !GetAtt OrderProcessingQueue.QueueName
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt OrderStatusNotifications.TopicName
+        - AWSSecretsManagerReadWrite
+        - EC2SecurityGroupIngress:
+            GroupId: !Ref LambdaSecurityGroup
+            IpProtocol: tcp
+            FromPort: 5432
+            ToPort: 5432
+            CidrIp: 10.0.0.0/8
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds:
+          - !Ref PrivateSubnet1
+          - !Ref PrivateSubnet2
+      Events:
+        SQSEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt OrderProcessingQueue.Arn
+            BatchSize: 10
+            BatchWindow: 10
+
+  # NotificationService Lambda Function
+  NotificationServiceFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'NotificationService-${EnvironmentName}'
+      CodeUri: src/notification_service_lambda/
+      Handler: app.lambda_handler
+      Description: Send order status notifications
+      MemorySize: 256
+      Timeout: 30
+      Policies:
+        - SNSCrudPolicy:
+            TopicName: !GetAtt OrderStatusNotifications.TopicName
+      Events:
+        SNSEvent:
+          Type: SNS
+          Properties:
+            Topic: !Ref OrderStatusNotifications
+
+  # API Gateway
+  OrdersApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub 'OrderProcessingAPI-${EnvironmentName}'
+      StageName: !Ref EnvironmentName
+      TracingEnabled: true
+      MethodSettings:
+        - ResourcePath: '/*'
+          HttpMethod: '*'
+          LoggingLevel: INFO
+          DataTraceEnabled: true
+          MetricsEnabled: true
+
+  # Lambda Security Group
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Lambda functions
+      VpcId: !Ref VPC
+      EgressRules:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  # Database Security Group
+  DatabaseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for RDS database
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref LambdaSecurityGroup
+
+  # VPC and Networking (simplified - use existing VPC in production)
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+
+  # CloudWatch Alarms
+  OrderProcessorErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'OrderProcessor-Errors-${EnvironmentName}'
+      AlarmDescription: Alert when OrderProcessor Lambda has errors
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref OrderProcessorFunction
+
+  DLQMessageAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'OrderProcessing-DLQ-Messages-${EnvironmentName}'
+      AlarmDescription: Alert when messages appear in DLQ
+      MetricName: ApproximateNumberOfMessagesVisible
+      Namespace: AWS/SQS
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt OrderProcessingDLQ.QueueName
+
+Outputs:
+  OrdersApiEndpoint:
+    Description: API Gateway endpoint for orders
+    Value: !Sub 'https://${OrdersApi}.execute-api.${AWS::Region}.amazonaws.com/${EnvironmentName}/orders'
+  
+  OrderProcessingQueueUrl:
+    Description: SQS Queue URL for order processing
+    Value: !Ref OrderProcessingQueue
+  
+  OrderStatusNotificationsTopic:
+    Description: SNS Topic ARN for order status notifications
+    Value: !Ref OrderStatusNotifications
+  
+  DatabaseEndpoint:
+    Description: RDS Database endpoint
+    Value: !GetAtt OrderDatabase.Endpoint.Address
+  
+  OrderCreatorFunctionArn:
+    Description: OrderCreator Lambda Function ARN
+    Value: !GetAtt OrderCreatorFunction.Arn
+  
+  OrderProcessorFunctionArn:
+    Description: OrderProcessor Lambda Function ARN
+    Value: !GetAtt OrderProcessorFunction.Arn
+  
+  NotificationServiceFunctionArn:
+    Description: NotificationService Lambda Function ARN
+    Value: !GetAtt NotificationServiceFunction.Arn

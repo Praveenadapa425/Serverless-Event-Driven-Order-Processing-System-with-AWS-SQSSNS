@@ -1,0 +1,172 @@
+org: saidatta
+app: serverless-order-processing
+service: serverless-order-processing
+
+frameworkVersion: '3'
+
+provider:
+  name: aws
+  runtime: python3.9
+  region: ${opt:region, 'us-east-1'}
+  stage: ${opt:stage, 'dev'}
+  logs:
+    restApi: false
+  environment:
+    DB_HOST: ${self:custom.dbHost}
+    DB_PORT: ${self:custom.dbPort}
+    DB_NAME: ${self:custom.dbName}
+    DB_USER: ${self:custom.dbUser}
+    DB_PASSWORD: ${self:custom.dbPassword}
+    ORDER_PROCESSING_QUEUE_URL: !Ref OrderProcessingQueue
+    ORDER_STATUS_TOPIC_ARN: !Ref OrderStatusNotifications
+  
+  # IAM permissions
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - sqs:SendMessage
+            - sqs:GetQueueUrl
+          Resource:
+            - !GetAtt OrderProcessingQueue.Arn
+        
+        - Effect: Allow
+          Action:
+            - sqs:ReceiveMessage
+            - sqs:DeleteMessage
+            - sqs:GetQueueAttributes
+          Resource:
+            - !GetAtt OrderProcessingQueue.Arn
+        
+        - Effect: Allow
+          Action:
+            - sns:Publish
+          Resource:
+            - !Ref OrderStatusNotifications
+        
+        - Effect: Allow
+          Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+          Resource: arn:aws:logs:*:*:*
+        
+        - Effect: Allow
+          Action:
+            - ec2:CreateNetworkInterface
+            - ec2:DescribeNetworkInterfaces
+            - ec2:DeleteNetworkInterface
+          Resource: '*'
+
+functions:
+  orderCreator:
+    handler: src/order_creator_lambda/app.lambda_handler
+    description: Create new orders via API Gateway
+    events:
+      - http:
+          path: orders
+          method: post
+          cors: true
+    timeout: 30
+    memorySize: 512
+    environment:
+      PYTHONPATH: '/var/task/src'
+
+  orderProcessor:
+    handler: src/order_processor_lambda/app.lambda_handler
+    description: Process orders from SQS queue
+    events:
+      - sqs:
+          arn: !GetAtt OrderProcessingQueue.Arn
+          batchSize: 10
+          maximumBatchingWindow: 10
+    timeout: 60
+    memorySize: 512
+    environment:
+      PYTHONPATH: '/var/task/src'
+
+  notificationService:
+    handler: src/notification_service_lambda/app.lambda_handler
+    description: Send order status notifications
+    events:
+      - sns:
+          arn: !Ref OrderStatusNotifications
+          topicName: OrderStatusNotifications
+    timeout: 30
+    memorySize: 256
+    environment:
+      PYTHONPATH: '/var/task/src'
+
+# CloudFormation resources
+resources:
+  Resources:
+    # SQS Queue for order processing
+    OrderProcessingQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: OrderProcessingQueue
+        VisibilityTimeout: 60
+        MessageRetentionPeriod: 1209600  # 14 days
+        RedrivePolicy:
+          deadLetterTargetArn: !GetAtt OrderProcessingDLQ.Arn
+          maxReceiveCount: 3
+
+    # Dead Letter Queue
+    OrderProcessingDLQ:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: OrderProcessingDLQ
+        MessageRetentionPeriod: 1209600  # 14 days
+
+    # SNS Topic for order status notifications
+    OrderStatusNotifications:
+      Type: AWS::SNS::Topic
+      Properties:
+        TopicName: OrderStatusNotifications
+        DisplayName: Order Status Updates
+
+    # RDS Database (optional - requires additional setup)
+    # OrderDatabase:
+    #   Type: AWS::RDS::DBInstance
+    #   Properties:
+    #     Engine: postgres
+    #     DBInstanceClass: db.t3.micro
+    #     AllocatedStorage: 20
+    #     StorageType: gp2
+    #     DBName: ${self:custom.dbName}
+    #     MasterUsername: ${self:custom.dbUser}
+    #     MasterUserPassword: ${self:custom.dbPassword}
+
+  Outputs:
+    OrderCreatorUrl:
+      Description: URL of the Order Creator API endpoint
+      Value:
+        Fn::Sub: 'https://${ApiGatewayRestApi}.execute-api.${AWS::Region}.amazonaws.com/${self:provider.stage}/orders'
+    
+    OrderProcessingQueueUrl:
+      Description: SQS Queue URL for order processing
+      Value: !Ref OrderProcessingQueue
+    
+    OrderStatusTopicArn:
+      Description: SNS Topic ARN for order status notifications
+      Value: !Ref OrderStatusNotifications
+
+custom:
+  dbHost: ${env:DB_HOST, 'localhost'}
+  dbPort: ${env:DB_PORT, '5432'}
+  dbName: ${env:DB_NAME, 'orders_db'}
+  dbUser: ${env:DB_USER, 'postgres'}
+  dbPassword: ${env:DB_PASSWORD, 'postgres'}
+
+plugins:
+  - serverless-python-requirements
+
+package:
+  individually: true
+  exclude:
+    - tests/**
+    - .pytest_cache/**
+    - __pycache__/**
+    - .env
+    - docker-compose.yml

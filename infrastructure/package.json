@@ -1,0 +1,22 @@
+{
+  "name": "serverless-order-processing",
+  "version": "1.0.0",
+  "description": "Serverless Event-Driven Order Processing System for AWS",
+  "main": "serverless.yml",
+  "author": "GitHub Copilot",
+  "license": "MIT",
+  "dependencies": {},
+  "devDependencies": {
+    "serverless": "^3.38.0",
+    "serverless-python-requirements": "^6.0.0"
+  },
+  "scripts": {
+    "deploy": "serverless deploy",
+    "deploy:dev": "serverless deploy --stage dev --region us-east-1",
+    "deploy:prod": "serverless deploy --stage prod --region us-east-1",
+    "remove": "serverless remove",
+    "logs": "serverless logs",
+    "invoke": "serverless invoke",
+    "offline": "serverless offline start"
+  }
+}
