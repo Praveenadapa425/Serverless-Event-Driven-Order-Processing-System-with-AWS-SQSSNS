@@ -1,93 +1,134 @@
-version: "3.9"
+version: '3.8'
 
 services:
+  # LocalStack - AWS services emulation
   localstack:
-    image: localstack/localstack:3.7
+    image: localstack/localstack:latest
     container_name: localstack
     ports:
       - "4566:4566"
-      - "4510-4559:4510-4559"
+      - "4571:4571"
     environment:
-      - SERVICES=lambda,apigateway,sqs,sns,cloudwatch,logs,iam,sts
       - DEBUG=1
-      - AWS_DEFAULT_REGION=${AWS_REGION:-us-east-1}
+      - SERVICES=apigateway,lambda,sqs,sns,logs,rds
+      - LAMBDA_EXECUTOR=docker
       - DOCKER_HOST=unix:///var/run/docker.sock
-      - LAMBDA_EXECUTOR=docker-reuse
-      - LS_LOG=info
+      - AWS_DEFAULT_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
     volumes:
+      - "${TMPDIR:-/tmp/localstack}:/tmp/localstack"
       - "/var/run/docker.sock:/var/run/docker.sock"
-      - "./infrastructure/localstack:/etc/localstack/init/ready.d"
-      - "./.localstack:/var/lib/localstack"
+      - "./scripts/init-localstack.sh:/docker-entrypoint-initaws.d/init-localstack.sh"
     healthcheck:
-      test: ["CMD", "bash", "-lc", "awslocal sts get-caller-identity"]
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
       interval: 10s
       timeout: 5s
-      retries: 15
+      retries: 5
+    networks:
+      - order-processing-network
 
+  # PostgreSQL Database
   postgres:
-    image: postgres:16-alpine
-    container_name: orders-postgres
-    environment:
-      - POSTGRES_DB=${DB_NAME:-orders_db}
-      - POSTGRES_USER=${DB_USER:-orders_user}
-      - POSTGRES_PASSWORD=${DB_PASSWORD:-orders_password}
+    image: postgres:15-alpine
+    container_name: postgres-db
     ports:
       - "5432:5432"
+    environment:
+      - POSTGRES_DB=${DB_NAME:-orders_db}
+      - POSTGRES_USER=${DB_USER:-postgres}
+      - POSTGRES_PASSWORD=${DB_PASSWORD:-postgres}
+      - PGDATA=/var/lib/postgresql/data/pgdata
     volumes:
-      - "./infrastructure/db/init:/docker-entrypoint-initdb.d"
-      - "postgres_data:/var/lib/postgresql/data"
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-orders_user} -d ${DB_NAME:-orders_db}"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - order-processing-network
 
+  # Order Creator Lambda (for testing/development)
   order-creator-service:
+    image: local/order-creator-lambda:latest
     build:
       context: .
       dockerfile: src/order_creator_lambda/Dockerfile
-    container_name: order-creator-service
-    env_file:
-      - .env
+    container_name: order-creator-lambda
     environment:
-      - AWS_ENDPOINT_URL=${AWS_ENDPOINT_URL:-http://localstack:4566}
-      - DB_HOST=${DB_HOST:-postgres}
-      - DB_PORT=${DB_PORT:-5432}
+      - AWS_ENDPOINT_URL=http://localstack:4566
+      - AWS_DEFAULT_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - DB_HOST=postgres
+      - DB_PORT=5432
       - DB_NAME=${DB_NAME:-orders_db}
-      - DB_USER=${DB_USER:-orders_user}
-      - DB_PASSWORD=${DB_PASSWORD:-orders_password}
+      - DB_USER=${DB_USER:-postgres}
+      - DB_PASSWORD=${DB_PASSWORD:-postgres}
+      - ORDER_PROCESSING_QUEUE_URL=http://localstack:4566/000000000000/OrderProcessingQueue
+    ports:
+      - "9001:8080"
     depends_on:
       postgres:
         condition: service_healthy
       localstack:
         condition: service_healthy
-    command: ["sleep", "infinity"]
+    networks:
+      - order-processing-network
 
+  # Order Processor Lambda (for testing/development)
   order-processor-service:
+    image: local/order-processor-lambda:latest
     build:
       context: .
       dockerfile: src/order_processor_lambda/Dockerfile
-    container_name: order-processor-service
-    env_file:
-      - .env
+    container_name: order-processor-lambda
+    environment:
+      - AWS_ENDPOINT_URL=http://localstack:4566
+      - AWS_DEFAULT_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=${DB_NAME:-orders_db}
+      - DB_USER=${DB_USER:-postgres}
+      - DB_PASSWORD=${DB_PASSWORD:-postgres}
+      - ORDER_STATUS_TOPIC_ARN=arn:aws:sns:us-east-1:000000000000:OrderStatusNotifications
+    ports:
+      - "9002:8080"
     depends_on:
       postgres:
         condition: service_healthy
       localstack:
         condition: service_healthy
-    command: ["sleep", "infinity"]
+    networks:
+      - order-processing-network
 
+  # Notification Service Lambda (for testing/development)
   notification-service:
+    image: local/notification-service-lambda:latest
     build:
       context: .
       dockerfile: src/notification_service_lambda/Dockerfile
-    container_name: notification-service
-    env_file:
-      - .env
+    container_name: notification-service-lambda
+    environment:
+      - AWS_ENDPOINT_URL=http://localstack:4566
+      - AWS_DEFAULT_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+    ports:
+      - "9003:8080"
     depends_on:
       localstack:
         condition: service_healthy
-    command: ["sleep", "infinity"]
+    networks:
+      - order-processing-network
 
 volumes:
   postgres_data:
+
+networks:
+  order-processing-network:
+    driver: bridge
