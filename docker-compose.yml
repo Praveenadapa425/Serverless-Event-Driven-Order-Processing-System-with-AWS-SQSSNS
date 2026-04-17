@@ -1,0 +1,93 @@
+version: "3.9"
+
+services:
+  localstack:
+    image: localstack/localstack:3.7
+    container_name: localstack
+    ports:
+      - "4566:4566"
+      - "4510-4559:4510-4559"
+    environment:
+      - SERVICES=lambda,apigateway,sqs,sns,cloudwatch,logs,iam,sts
+      - DEBUG=1
+      - AWS_DEFAULT_REGION=${AWS_REGION:-us-east-1}
+      - DOCKER_HOST=unix:///var/run/docker.sock
+      - LAMBDA_EXECUTOR=docker-reuse
+      - LS_LOG=info
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock"
+      - "./infrastructure/localstack:/etc/localstack/init/ready.d"
+      - "./.localstack:/var/lib/localstack"
+    healthcheck:
+      test: ["CMD", "bash", "-lc", "awslocal sts get-caller-identity"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: orders-postgres
+    environment:
+      - POSTGRES_DB=${DB_NAME:-orders_db}
+      - POSTGRES_USER=${DB_USER:-orders_user}
+      - POSTGRES_PASSWORD=${DB_PASSWORD:-orders_password}
+    ports:
+      - "5432:5432"
+    volumes:
+      - "./infrastructure/db/init:/docker-entrypoint-initdb.d"
+      - "postgres_data:/var/lib/postgresql/data"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-orders_user} -d ${DB_NAME:-orders_db}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  order-creator-service:
+    build:
+      context: .
+      dockerfile: src/order_creator_lambda/Dockerfile
+    container_name: order-creator-service
+    env_file:
+      - .env
+    environment:
+      - AWS_ENDPOINT_URL=${AWS_ENDPOINT_URL:-http://localstack:4566}
+      - DB_HOST=${DB_HOST:-postgres}
+      - DB_PORT=${DB_PORT:-5432}
+      - DB_NAME=${DB_NAME:-orders_db}
+      - DB_USER=${DB_USER:-orders_user}
+      - DB_PASSWORD=${DB_PASSWORD:-orders_password}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+    command: ["sleep", "infinity"]
+
+  order-processor-service:
+    build:
+      context: .
+      dockerfile: src/order_processor_lambda/Dockerfile
+    container_name: order-processor-service
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+    command: ["sleep", "infinity"]
+
+  notification-service:
+    build:
+      context: .
+      dockerfile: src/notification_service_lambda/Dockerfile
+    container_name: notification-service
+    env_file:
+      - .env
+    depends_on:
+      localstack:
+        condition: service_healthy
+    command: ["sleep", "infinity"]
+
+volumes:
+  postgres_data:
